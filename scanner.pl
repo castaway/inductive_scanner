@@ -1,11 +1,16 @@
 #!/usr/bin/perl
 use strictures 2;
+use feature 'signatures';
 use Time::HiRes 'sleep';
+use Device::SerialPort;
+use autodie;
+$|=1;
 ## Setup:
 # Open serial to gcode output:
-my $3dprinter;  # = something involving dev/ttyACM0 probably
+my $printer = { port => '/dev/ttyACM0' };  # = something involving dev/ttyACM0 probably
+
 # Initial GCODE gubbins?
-setupPrinter($3dprinter);
+setupPrinter($printer);
 
 #  Open serial to sensor
 my $sensor; # = maybe dev/ttyUSB0 ?
@@ -37,19 +42,49 @@ my %seen_loc;
 while($current_divisions < $max_divisions) {
     for(my $x_loc = $min_x; $x_loc < $max_x; $x_loc += ($max_x-$min_x)/$current_divisions) {
         for(my $y_loc = 0; $y_loc < $max_y; $y_loc += ($max_y-$min_y)/$current_divisions) {
+	    print "$x_loc, $y_loc\n";
 	    next if ($seen_loc{"$x_loc,$y_loc"}++);
-	    moveHead($3dprinter, $x_loc, $y_loc);
+	    moveHead($printer, $x_loc, $y_loc);
 	    
             my ($lval, $rpval) = readSensor($sensor);
             push @output, [ $x_loc, $y_loc, $lval, $rpval] ;
+
         }
     }
+	    die;
 
     $current_divisions *= 2;
 }
 
-sub moveHead($3dprinter, $x_loc, $y_loc) {
-    $3dprinter->{fh}->say("G0X$x_locY$y_loc\n");
+sub setupPrinter($printer) {
+    #    open(my $pfh, '+<', $printer->{port}) or die "Can't open ".$printer->{port};
+    my $port = Device::SerialPort->new('/dev/ttyACM0');
+    $port->databits(8);
+    $port->baudrate(115200);
+    $port->parity('none');
+    $port->stopbits(1);
+    $printer->{fh} = $port;
+
+    #print $pfh "N0 M110 N0*25\n";
+    $port->write("G21\n"); # units, mm
+    $port->write("G90\n"); # positioning, absolute
+    $port->write("G28XYZ\n"); # Home!
+}
+
+sub readSensor($sensor) {
+}
+
+sub moveHead($printer, $x_loc, $y_loc) {
+    print "Moving to $x_loc, $y_loc\n";
+    die "huge x: $x_loc" if $x_loc > 200;
+    die "huge y: $y_loc" if $y_loc > 200;
+    
+    $printer->{fh}->write("G0X${x_loc}Y${y_loc} F6000\n");
+    $printer->{fh}->write("M400\n");
+    # All motors off (so as to not effect the reading).
+    $printer->{fh}->write("M18\n");
+
+    sleep 0.1;
 }
 
 sub sensorWriteReg($sensor, $index, $val) {
@@ -62,5 +97,5 @@ sub sensorWriteReg($sensor, $index, $val) {
     # We need to read 8 bytes, because otherwise we will fall out of sync.  However,
     # these are underdocumented, and we don't really care, so we don't actually
     # do anything with them.
-    my $in = <$sensor->{fh}>;
+    my $in = $sensor->{fh}->readline;
 }

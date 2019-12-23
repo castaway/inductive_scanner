@@ -20,8 +20,12 @@ use Moo;
 has 'port' => (is => 'rw');
 has 'asleep' => (is => 'rw');
 
-my $READ_REGISTER_CMD = 3;
 my $WRITE_REGISTER_CMD = 2;
+my $READ_REGISTER_CMD = 3;
+my $ENABLE_BSL_CMD = 4;
+my $STREAM_START_CMD = 6;
+my $STREAM_STOP_CMD = 7;
+my $FIRMWARE_VER_CMD = 9;
 
 
 sub BUILD {
@@ -157,6 +161,85 @@ sub write_reg {
 
 }
 
+=head2 start_stream
+
+Send 0x06, and type of data we want to return (RP+L or LHR)
+
+=cut
+
+sub start_stream {
+    my ($self, $data_type) = @_;
+    my $stream_type = uc($data_type) eq 'RP+L' ? 0x20 : 0x38;
+
+    $self->send_command($STREAM_START_CMD, $stream_type);
+
+    # 26 dummy bytes before the actual data starts.
+    () = $self->port->read(26);
+    
+    $self->port->read_const_time(1000);
+    my $in = $self->port->read(4*1024);
+    $self->stop_stream;
+    
+    say "Response length (before trim): ", length($in);
+    
+    #my @in = map {ord} split //, $in;
+    
+    say "Response length: ", length($in);
+    say "Response from start_stream: <<<$in>>>";
+
+    my @reads = ();
+    while (length $in >= 8) {
+        (my ($status, $rp, $l, $magic1, $index, $magic2), $in) = unpack("CS>S>CCC a*", $in);
+        die "NO_SENSOR_OSC" if $status & 1<<7;
+        die "POR_READ" if $status & 1;
+        die "magic1" if $magic1 != 0x5a;
+        die "magic2" if $magic2 != 0x5a;
+        printf ("0x%02x, %10d, %10d, %10d\n", $status, $rp, $l, $index);
+        push @reads, { status => sprintf("0x%02x", $status),
+                       rp     => sprintf("%10d", $rp),
+                       l      => sprintf("%10d", $l),
+                       index  => sprintf("%10d", $index),
+        };
+    }
+
+    say('');
+
+    return \@reads;
+    # 0: 0, 1: 0, 2: 0, 3: 0, 4: 0, 5: 0, 6: 0, 7: 0, 8: 0, 9: 0, 10: 0, 11: 0, 12: 0, 13: 0, 14: 0, 15: 0, 16: 0, 17: 0, 18: 0, 19: 0, 20: 0, 21: 0, 22: 0, 23: 0, 24: 0, 25: 0,
+    # 26: 104, 27: 0, 28: 0, 29: 0, 30: 0, 31: 90, 32: 6, 33: 90,
+    # 34: 104, 35: 0, 36: 0, 37: 0, 38: 0, 39: 90, 40: 14, 41: 90,
+    # 42: 104, 43: 0, 44: 0, 45: 0, 46: 0, 47: 90, 48: 22, 49: 90,
+    # 50: 104,
+    # Expected, RP+L mode: rp_status, rp_data_msb, rp_data_lsb, l_data_msb, l_data_lsb, 0x5a, index, 0x5a
+    # 0x5a = 90
+    # 104 = 
+    # 76543210
+    # 01101000
+    # DRDYB (data ready)
+    # RP_HIN: RP_DATA high threshold comparator
+    # !RP_HI_LON
+    # L_HIN: L_DATA high threshold comparator
+    # !L_HI_LON
+    # !reserved
+    # !POR_READ
+    
+    
+    # NB: Does not agree with documentation!
+    #return \@in;
+}
+
+sub stop_stream {
+    my ($self) = @_;
+
+    $self->send_command($STREAM_STOP_CMD);
+
+    $self->port->read(32-4);
+}
+
+# It turns out that the response length is not determined by the command, but it's always echo-back,
+# followed by however much data the command generates, followed by zero-padding up to 32 bytes.
+# Possibly we should handle all of that here, rather then expecting the caller of send_command
+# to deal with the actual data + padding read, and hardcoding the length.
 sub send_command {
     my ($self, @bytes) = @_;
     my $command_string = join '', map {sprintf "%02X", $_} @bytes;
@@ -172,8 +255,10 @@ sub send_command {
     $self->port->read_const_time(1000);
     my $readback = $self->port->read(length($command_string));
     if ($readback ne $command_string) {
-        die "echo-back of command failed, sent '$command_string' but got '$readback'";
+        say STDERR "WARNING: echo-back of command failed, sent '$command_string' but got '$readback'";
     }
+
+    return;
 }
 
 sub sleep {
